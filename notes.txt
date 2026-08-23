@@ -1,0 +1,13 @@
+wss://polygon-mainnet.g.alchemy.com/v2/alch_j_FMlUK3FPov0DuI8KEpT
+
+WATCHED = {
+    # "pspspsps5": "0xb0f85baa97990910a3e8ac2b4a58a322f01ecef5",
+    "std0": "0xdf7930e89a2c47560165331863c31deca0733dcd",
+}
+
+git status
+git add .
+git commit -m "summary"
+git push
+
+source .venv/bin/activate
