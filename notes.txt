@@ -11,3 +11,8 @@ git commit -m "summary"
 git push
 
 source .venv/bin/activate
+
+cd ~/Desktop
+git clone git@github.com:gfse18/polymarket.git
+cd ~/Desktop/polymarket
+git pull
