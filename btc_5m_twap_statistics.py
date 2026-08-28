@@ -24,6 +24,7 @@ import json
 import math
 import sqlite3
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -34,6 +35,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from fetch_current_btc_5m import (
     WINDOW_SECONDS,
@@ -108,6 +110,11 @@ class TwapState:
     price: float | None = None
     connected: bool = False
     received_monotonic: float | None = None
+
+    def reset_for_connection(self) -> None:
+        self.price = None
+        self.connected = False
+        self.received_monotonic = None
 
     def is_usable(self, now_monotonic: float) -> bool:
         return (
@@ -258,14 +265,14 @@ def parse_twap_event(event: Any) -> float | None:
     full_accuracy = payload.get("full_accuracy_value")
     if isinstance(full_accuracy, str):
         try:
-            return float(Decimal(full_accuracy) / (Decimal(10) ** 18))
-        except (InvalidOperation, ValueError):
+            price = float(Decimal(full_accuracy) / (Decimal(10) ** 18))
+        except (InvalidOperation, OverflowError, ValueError):
             return None
-
-    try:
-        price = float(payload.get("value"))
-    except (TypeError, ValueError):
-        return None
+    else:
+        try:
+            price = float(payload.get("value"))
+        except (TypeError, ValueError):
+            return None
     return price if math.isfinite(price) and price > 0 else None
 
 
@@ -320,7 +327,15 @@ class DailyDatabase:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.dataset_date = dataset_date
         self.path = DATA_DIR / f"btc_5m_twap_statistics_{dataset_date.isoformat()}.sqlite3"
-        self.connection = sqlite3.connect(self.path, timeout=30)
+        # Sample batches are written from a background thread so an SD-card
+        # commit cannot delay the 4 Hz sampler. All access is serialized by
+        # _lock; check_same_thread=False only permits that controlled handoff.
+        self.connection = sqlite3.connect(
+            self.path,
+            timeout=30,
+            check_same_thread=False,
+        )
+        self._lock = threading.RLock()
         self.pending_samples = 0
         try:
             self.connection.execute("PRAGMA foreign_keys = ON")
@@ -413,11 +428,12 @@ class DailyDatabase:
         return int(row[0])
 
     def set_price_to_beat(self, market_id: int, price: float) -> None:
-        self.connection.execute(
-            "UPDATE markets SET price_to_beat = ? WHERE id = ?",
-            (price, market_id),
-        )
-        self.connection.commit()
+        with self._lock:
+            self.connection.execute(
+                "UPDATE markets SET price_to_beat = ? WHERE id = ?",
+                (price, market_id),
+            )
+            self.connection.commit()
 
     def record_sample(
         self,
@@ -430,7 +446,32 @@ class DailyDatabase:
         twap_price: float | None,
         sample_valid: bool,
     ) -> None:
-        self.connection.execute(
+        with self._lock:
+            inserted = self._record_sample(
+                market_id,
+                sample_index,
+                up_bid,
+                up_ask,
+                down_bid,
+                down_ask,
+                twap_price,
+                sample_valid,
+            )
+            if inserted and self.pending_samples >= DATABASE_COMMIT_EVERY_SAMPLES:
+                self.commit()
+
+    def _record_sample(
+        self,
+        market_id: int,
+        sample_index: int,
+        up_bid: float | None,
+        up_ask: float | None,
+        down_bid: float | None,
+        down_ask: float | None,
+        twap_price: float | None,
+        sample_valid: bool,
+    ) -> bool:
+        cursor = self.connection.execute(
             """
             INSERT OR IGNORE INTO samples(
                 market_id, sample_index,
@@ -449,8 +490,16 @@ class DailyDatabase:
                 int(sample_valid),
             ),
         )
+        if cursor.rowcount == 0:
+            return False
         self.pending_samples += 1
-        if self.pending_samples >= DATABASE_COMMIT_EVERY_SAMPLES:
+        return True
+
+    def record_samples(self, rows: list[tuple[Any, ...]]) -> None:
+        """Write and commit one ordered batch from the background writer."""
+        with self._lock:
+            for row in rows:
+                self._record_sample(*row)
             self.commit()
 
     def record_missing_range(self, market_id: int, stop_index: int) -> None:
@@ -467,17 +516,22 @@ class DailyDatabase:
             )
 
     def commit(self) -> None:
-        self.connection.commit()
-        self.pending_samples = 0
+        with self._lock:
+            self.connection.commit()
+            self.pending_samples = 0
 
     def close(self) -> None:
-        self.connection.execute(
-            "UPDATE runs SET ended_at_utc = ? WHERE id = ?",
-            (datetime.now(timezone.utc).isoformat(timespec="seconds"), self.run_id),
-        )
-        self.connection.commit()
-        self.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        self.connection.close()
+        with self._lock:
+            self.connection.execute(
+                "UPDATE runs SET ended_at_utc = ? WHERE id = ?",
+                (
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    self.run_id,
+                ),
+            )
+            self.connection.commit()
+            self.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.connection.close()
 
 
 # ============================================================
@@ -486,9 +540,46 @@ class DailyDatabase:
 
 
 async def send_text_pings(websocket, interval_seconds: float) -> None:
-    while True:
-        await asyncio.sleep(interval_seconds)
-        await websocket.send("PING")
+    try:
+        while True:
+            await asyncio.sleep(interval_seconds)
+            await websocket.send("PING")
+    except ConnectionClosed:
+        # The receive loop owns reconnecting. A ping that races with a normal
+        # socket close must not terminate the entire collector.
+        return
+
+
+async def stop_ping_task(task: asyncio.Task | None) -> None:
+    """Stop a connection's ping task without leaking close-race errors."""
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except (ConnectionClosed, OSError, TimeoutError):
+        pass
+    except Exception as exc:
+        # Cleanup errors are diagnostic; they must not stop overnight capture.
+        print(
+            f"WARNING: ping task cleanup failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+
+
+def cancellation_requested() -> bool:
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
+def report_reconnect(feed: str, exc: BaseException, delay: float) -> None:
+    print(
+        f"{feed} connection lost ({type(exc).__name__}: {exc}); "
+        f"reconnecting in {delay:g}s",
+        file=sys.stderr,
+    )
 
 
 async def clob_worker(market: MarketContext, state: MarketBookState) -> None:
@@ -501,6 +592,7 @@ async def clob_worker(market: MarketContext, state: MarketBookState) -> None:
 
     while True:
         ping_task: asyncio.Task | None = None
+        reconnect_problem: BaseException | None = None
         try:
             state.reset_for_connection()
             async with websockets.connect(
@@ -525,16 +617,20 @@ async def clob_worker(market: MarketContext, state: MarketBookState) -> None:
                     apply_clob_event(state, event)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            state.connected = False
-            await asyncio.sleep(reconnect_delay)
-            reconnect_delay = min(reconnect_delay * 2, RECONNECT_MAX_SECONDS)
+        except (ConnectionClosed, OSError, TimeoutError) as exc:
+            # A close timeout can replace CancelledError while an async context
+            # manager exits. Preserve an intentional market-end cancellation.
+            if cancellation_requested():
+                raise asyncio.CancelledError from None
+            reconnect_problem = exc
         finally:
             state.connected = False
-            if ping_task is not None:
-                ping_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await ping_task
+            await stop_ping_task(ping_task)
+
+        if reconnect_problem is not None:
+            report_reconnect("CLOB", reconnect_problem, reconnect_delay)
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, RECONNECT_MAX_SECONDS)
 
 
 async def twap_worker(state: TwapState) -> None:
@@ -546,8 +642,9 @@ async def twap_worker(state: TwapState) -> None:
 
     while True:
         ping_task: asyncio.Task | None = None
+        reconnect_problem: BaseException | None = None
         try:
-            state.connected = False
+            state.reset_for_connection()
             async with websockets.connect(
                 RTDS_WS_URL,
                 ping_interval=20,
@@ -573,16 +670,18 @@ async def twap_worker(state: TwapState) -> None:
                         state.received_monotonic = time.monotonic()
         except asyncio.CancelledError:
             raise
-        except Exception:
-            state.connected = False
-            await asyncio.sleep(reconnect_delay)
-            reconnect_delay = min(reconnect_delay * 2, RECONNECT_MAX_SECONDS)
+        except (ConnectionClosed, OSError, TimeoutError) as exc:
+            if cancellation_requested():
+                raise asyncio.CancelledError from None
+            reconnect_problem = exc
         finally:
             state.connected = False
-            if ping_task is not None:
-                ping_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await ping_task
+            await stop_ping_task(ping_task)
+
+        if reconnect_problem is not None:
+            report_reconnect("TWAP", reconnect_problem, reconnect_delay)
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, RECONNECT_MAX_SECONDS)
 
 
 async def price_to_beat_worker(
@@ -597,7 +696,7 @@ async def price_to_beat_worker(
         except (OSError, TimeoutError, ValueError, json.JSONDecodeError):
             price = None
         if price is not None:
-            database.set_price_to_beat(market_id, price)
+            await asyncio.to_thread(database.set_price_to_beat, market_id, price)
             return
         await asyncio.sleep(PRICE_TO_BEAT_RETRY_SECONDS)
 
@@ -626,6 +725,29 @@ def book_is_usable(state: MarketBookState) -> bool:
         and down.best_bid is not None
         and down.best_ask is not None
     )
+
+
+def snapshot_state(
+    book_state: MarketBookState,
+    twap_state: TwapState,
+) -> tuple[tuple[float | None, ...], float | None, bool]:
+    """Read both latest feed states without yielding between the reads."""
+    now_monotonic = time.monotonic()
+    values = quote_values(book_state)
+    twap_price = twap_state.price
+    valid = book_is_usable(book_state) and twap_state.is_usable(now_monotonic)
+    return values, twap_price, valid
+
+
+async def write_sample_batch_after(
+    previous_write: asyncio.Task | None,
+    database: DailyDatabase,
+    rows: list[tuple[Any, ...]],
+) -> None:
+    """Serialize sample batches off the event loop in submission order."""
+    if previous_write is not None:
+        await previous_write
+    await asyncio.to_thread(database.record_samples, rows)
 
 
 def render_sample(
@@ -657,7 +779,6 @@ async def collect_market(
     database: DailyDatabase,
     market: MarketContext,
     twap_state: TwapState,
-    background_tasks: set[asyncio.Task],
 ) -> None:
     market_id = database.ensure_market(market)
     book_state = MarketBookState(
@@ -671,36 +792,82 @@ async def collect_market(
     price_task = asyncio.create_task(
         price_to_beat_worker(database, market_id, market)
     )
-    background_tasks.add(price_task)
-    price_task.add_done_callback(background_tasks.discard)
 
-    now = time.time()
-    first_live_index = math.ceil(
-        max(0.0, now - market.window_epoch) / SAMPLE_INTERVAL_SECONDS
-    )
-    first_live_index = max(0, min(first_live_index, SAMPLES_PER_MARKET))
-    database.record_missing_range(market_id, first_live_index)
+    pending_rows: list[tuple[Any, ...]] = []
+    last_write_task: asyncio.Task | None = None
 
-    try:
-        for sample_index in range(first_live_index, SAMPLES_PER_MARKET):
-            target_epoch = (
-                market.window_epoch + sample_index * SAMPLE_INTERVAL_SECONDS
+    def queue_sample(row: tuple[Any, ...]) -> None:
+        nonlocal pending_rows, last_write_task
+        pending_rows.append(row)
+        if len(pending_rows) >= DATABASE_COMMIT_EVERY_SAMPLES:
+            batch = pending_rows
+            pending_rows = []
+            last_write_task = asyncio.create_task(
+                write_sample_batch_after(last_write_task, database, batch)
             )
-            delay = target_epoch - time.time()
-            if delay > 0:
-                await asyncio.sleep(delay)
 
-            lateness = time.time() - target_epoch
-            if lateness > MAX_SAMPLE_LATENESS_SECONDS:
-                database.record_sample(
+    def queue_missing_range(stop_index: int) -> None:
+        for missing_index in range(
+            max(0, min(stop_index, SAMPLES_PER_MARKET))
+        ):
+            queue_sample(
+                (
                     market_id,
-                    sample_index,
+                    missing_index,
                     None,
                     None,
                     None,
                     None,
                     None,
                     False,
+                )
+            )
+
+    async def finish_writes() -> None:
+        nonlocal pending_rows, last_write_task
+        if pending_rows:
+            batch = pending_rows
+            pending_rows = []
+            last_write_task = asyncio.create_task(
+                write_sample_batch_after(last_write_task, database, batch)
+            )
+        if last_write_task is not None:
+            await last_write_task
+
+    # Convert the UTC market boundary to the monotonic clock once. Subsequent
+    # clock corrections cannot compress, stretch, or skip the 250 ms grid.
+    now = time.time()
+    now_monotonic = time.monotonic()
+    market_start_monotonic = now_monotonic + (market.window_epoch - now)
+    first_live_index = math.ceil(
+        max(0.0, now - market.window_epoch) / SAMPLE_INTERVAL_SECONDS
+    )
+    first_live_index = max(0, min(first_live_index, SAMPLES_PER_MARKET))
+    queue_missing_range(first_live_index)
+
+    try:
+        for sample_index in range(first_live_index, SAMPLES_PER_MARKET):
+            target_monotonic = (
+                market_start_monotonic
+                + sample_index * SAMPLE_INTERVAL_SECONDS
+            )
+            delay = target_monotonic - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            lateness = time.monotonic() - target_monotonic
+            if lateness > MAX_SAMPLE_LATENESS_SECONDS:
+                queue_sample(
+                    (
+                        market_id,
+                        sample_index,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        False,
+                    )
                 )
                 render_sample(
                     market,
@@ -711,37 +878,38 @@ async def collect_market(
                 )
                 continue
 
-            values = quote_values(book_state)
-            twap_price = twap_state.price
-            valid = book_is_usable(book_state) and twap_state.is_usable(
-                time.monotonic()
-            )
-            database.record_sample(
-                market_id,
-                sample_index,
-                *values,
-                twap_price,
-                valid,
+            values, twap_price, valid = snapshot_state(book_state, twap_state)
+            queue_sample(
+                (
+                    market_id,
+                    sample_index,
+                    *values,
+                    twap_price,
+                    valid,
+                )
             )
             render_sample(market, sample_index, values, twap_price, valid)
 
-        remaining = market.end_epoch - time.time()
+        remaining = (
+            market_start_monotonic + WINDOW_SECONDS - time.monotonic()
+        )
         if remaining > 0:
             await asyncio.sleep(remaining)
-        database.commit()
     finally:
         clob_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await clob_task
-
-
-async def cancel_tasks(tasks: set[asyncio.Task]) -> None:
-    for task in list(tasks):
-        task.cancel()
-    for task in list(tasks):
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-    tasks.clear()
+        price_task.cancel()
+        worker_results = await asyncio.gather(
+            clob_task,
+            price_task,
+            return_exceptions=True,
+        )
+        await finish_writes()
+        for result in worker_results:
+            if isinstance(result, BaseException) and not isinstance(
+                result,
+                asyncio.CancelledError,
+            ):
+                raise result
 
 
 async def discover_market() -> MarketContext:
@@ -768,7 +936,6 @@ async def run_collector() -> Path:
     last_path = database.path
     twap_state = TwapState()
     twap_task = asyncio.create_task(twap_worker(twap_state))
-    price_tasks: set[asyncio.Task] = set()
 
     print(f"Dataset: {database.path}")
     print("Collecting at 4 Hz. Press Ctrl+C to save and stop.")
@@ -777,20 +944,20 @@ async def run_collector() -> Path:
         while True:
             current_date = datetime.now(timezone.utc).date()
             if current_date != dataset_date:
-                await cancel_tasks(price_tasks)
                 database.close()
                 dataset_date = current_date
                 database = DailyDatabase(dataset_date)
                 last_path = database.path
 
             market = await discover_market()
-            await collect_market(database, market, twap_state, price_tasks)
+            await collect_market(database, market, twap_state)
     finally:
         twap_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await twap_task
-        await cancel_tasks(price_tasks)
-        database.close()
+        try:
+            with contextlib.suppress(asyncio.CancelledError):
+                await twap_task
+        finally:
+            database.close()
         if sys.stdout.isatty():
             print("\r\033[2K", end="")
 
