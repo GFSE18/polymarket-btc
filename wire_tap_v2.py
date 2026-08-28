@@ -31,10 +31,13 @@ from web3 import Web3
 
 POLYGON_WS = "wss://polygon-mainnet.g.alchemy.com/v2/alch_j_FMlUK3FPov0DuI8KEpT"
 GAMMA_API = "https://gamma-api.polymarket.com"
+DATA_API = "https://data-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 
 WATCHED = {
-    "std0": "0xdf7930e89a2c47560165331863c31deca0733dcd",
+    # "pspspsps5": "0xb0f85baa97990910a3e8ac2b4a58a322f01ecef5",
+    # "std0": "0xdf7930e89a2c47560165331863c31deca0733dcd",
+    "HighTempTation": "0x6011655c4afb76f36dd1b08a137a1ba73466b31e",
 }
 
 EXCHANGES = {
@@ -44,6 +47,7 @@ EXCHANGES = {
 
 WATCH_TAKER_FIELD_TOO = False
 GAMMA_TIMEOUT_SECONDS = 5
+TRADE_HISTORY_TIMEOUT_SECONDS = 5
 ORDER_BOOK_TIMEOUT_SECONDS = 3
 MAX_TOKEN_CACHE = 5_000
 MAX_SEEN_EVENTS = 10_000
@@ -203,6 +207,100 @@ def opposite_side(side):
     if side == "SELL":
         return "BUY"
     return side
+
+
+# ============================================================
+# STARTUP TRADE-HISTORY CONFIRMATION
+# ============================================================
+
+def fetch_latest_previous_trade(wallet):
+    """Return the newest public Data API trade for a watched wallet."""
+    response = requests.get(
+        f"{DATA_API}/trades",
+        params={
+            "user": wallet,
+            "limit": 1,
+            # Include trades where the wallet supplied maker liquidity too.
+            "takerOnly": "false",
+        },
+        timeout=TRADE_HISTORY_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    trades = response.json()
+
+    if not isinstance(trades, list):
+        raise ValueError("Data API returned an unexpected trade-history response")
+    if not trades:
+        return None
+    if not isinstance(trades[0], dict):
+        raise ValueError("Data API returned an invalid trade-history row")
+    return trades[0]
+
+
+def _trade_number(trade, field):
+    try:
+        return float(trade.get(field, 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def print_previous_trade(trader_name, wallet, trade):
+    """Print history without treating it as a newly detected live fill."""
+    timestamp = _trade_number(trade, "timestamp")
+    trade_time = (
+        datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+        if timestamp > 0
+        else "UNKNOWN"
+    )
+    size = _trade_number(trade, "size")
+    price = _trade_number(trade, "price")
+
+    print("-" * 120)
+    print(
+        f"[CONNECTION CONFIRMED] Latest previous trade for {trader_name}",
+        flush=True,
+    )
+    print(f"    wallet:       {wallet}")
+    print(f"    trade time:   {trade_time} (local)")
+    print(
+        f"    trade:        {trade.get('side') or '?'} "
+        f"{trade.get('outcome') or '?'}"
+    )
+    print(f"    market:       {trade.get('title') or 'UNKNOWN MARKET'}")
+    print(f"    shares:       {size:.6f}")
+    print(f"    price:        ~{price:.6f}")
+    print(f"    cash:         ${size * price:.6f}")
+    if trade.get("transactionHash"):
+        print(f"    tx:           {trade['transactionHash']}")
+    print("    source:       Polymarket Data API (historical; not logged)")
+    print("-" * 120, flush=True)
+
+
+async def print_latest_previous_trades():
+    """Fetch one historical confirmation after subscriptions succeed."""
+    print(
+        "Checking the latest previous trade for each watched wallet...",
+        flush=True,
+    )
+    for trader_name, wallet in WATCHED.items():
+        try:
+            trade = await asyncio.to_thread(fetch_latest_previous_trade, wallet)
+            if trade is None:
+                print(
+                    f"[CONNECTION CONFIRMED] {trader_name}: subscriptions "
+                    "are live; no previous public trade found.",
+                    flush=True,
+                )
+                continue
+            print_previous_trade(trader_name, wallet, trade)
+        except Exception as exc:
+            # History is only a visual confirmation; live event tracking must
+            # continue when the public Data API is unavailable.
+            print(
+                f"[history lookup warning] {trader_name}: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
 
 
 # ============================================================
@@ -640,6 +738,7 @@ async def watch():
                     if not subscriptions:
                         raise RuntimeError("No subscriptions succeeded")
                     print("Watcher live.", flush=True)
+                    await print_latest_previous_trades()
 
                     for message, receive_wall, receive_monotonic in buffered:
                         dispatch_subscription_message(

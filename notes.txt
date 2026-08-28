@@ -17,4 +17,4 @@ git clone git@github.com:gfse18/polymarket.git
 cd ~/Desktop/polymarket
 git pull
 
-python .\log_v1\log_v1_analysis.py .\log_v2\trades_2026-08-24_08.csv
+python .\log_v2_analysis.py .\log_v2\trades_2026-08-24_08.csv

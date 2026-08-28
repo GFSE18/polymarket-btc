@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -17,9 +18,16 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 try:
-    import msvcrt as _terminal_keyboard
-except ImportError:  # pragma: no cover - Windows is the target runtime.
-    _terminal_keyboard = None
+    import msvcrt as _msvcrt
+except ImportError:
+    _msvcrt = None
+
+try:
+    import select as _select
+    import termios as _termios
+    import tty as _tty
+except ImportError:  # pragma: no cover - These modules are POSIX-only.
+    _select = _termios = _tty = None
 
 from fetch_current_btc_5m import (
     WINDOW_SECONDS,
@@ -668,26 +676,89 @@ def render_paused_notice() -> None:
     sys.stdout.flush()
 
 
-def poll_runtime_printout(runtime_printout: bool) -> tuple[bool, bool]:
-    """Consume pending console keys and toggle the display when P is pressed."""
-    if _terminal_keyboard is None:
-        return runtime_printout, False
+class TerminalKeyboard:
+    """Read unbuffered terminal keys without blocking on Windows or POSIX."""
 
+    def __init__(self) -> None:
+        self._fd: int | None = None
+        self._original_attributes: list[Any] | None = None
+
+    def start(self) -> None:
+        if _msvcrt is not None:
+            return
+        if (
+            os.name != "posix"
+            or _select is None
+            or _termios is None
+            or _tty is None
+            or not sys.stdin.isatty()
+        ):
+            return
+        try:
+            self._fd = sys.stdin.fileno()
+            self._original_attributes = _termios.tcgetattr(self._fd)
+            _tty.setcbreak(self._fd)
+        except (OSError, ValueError):
+            self._fd = None
+            self._original_attributes = None
+
+    def read_pending(self) -> list[str]:
+        keys: list[str] = []
+        if _msvcrt is not None:
+            try:
+                while _msvcrt.kbhit():
+                    key = _msvcrt.getwch()
+                    if key in {"\x00", "\xe0"}:
+                        if _msvcrt.kbhit():
+                            _msvcrt.getwch()
+                        continue
+                    keys.append(key)
+            except OSError:
+                return keys
+            return keys
+
+        if self._fd is None or _select is None:
+            return keys
+        try:
+            while _select.select([self._fd], [], [], 0)[0]:
+                raw = os.read(self._fd, 1)
+                if not raw:
+                    break
+                keys.append(raw.decode("utf-8", errors="ignore"))
+        except (OSError, ValueError):
+            return keys
+        return keys
+
+    def close(self) -> None:
+        if (
+            self._fd is not None
+            and self._original_attributes is not None
+            and _termios is not None
+        ):
+            try:
+                _termios.tcsetattr(
+                    self._fd,
+                    _termios.TCSADRAIN,
+                    self._original_attributes,
+                )
+            except OSError:
+                pass
+        self._fd = None
+        self._original_attributes = None
+
+
+def poll_runtime_printout(
+    runtime_printout: bool,
+    keyboard: TerminalKeyboard,
+) -> tuple[bool, bool]:
+    """Consume pending console keys and toggle the display when P is pressed."""
     toggled = False
-    try:
-        while _terminal_keyboard.kbhit():
-            key = _terminal_keyboard.getwch()
-            if key in {"\x00", "\xe0"}:
-                if _terminal_keyboard.kbhit():
-                    _terminal_keyboard.getwch()
-                continue
-            if key == "\x03":
-                raise KeyboardInterrupt
-            if key.lower() == "p":
-                runtime_printout = not runtime_printout
-                toggled = True
-    except OSError:
-        return runtime_printout, toggled
+    for key in keyboard.read_pending():
+        if key == "\x03":
+            raise KeyboardInterrupt
+        if key.lower() == "p":
+            runtime_printout = not runtime_printout
+            toggled = True
     return runtime_printout, toggled
 
 
@@ -789,11 +860,16 @@ def main() -> int:
     next_scan_monotonic = time.monotonic()
 
     executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="book-scan")
-    if not runtime_printout:
-        render_paused_notice()
+    keyboard = TerminalKeyboard()
     try:
+        keyboard.start()
+        if not runtime_printout:
+            render_paused_notice()
         while True:
-            runtime_printout, toggled = poll_runtime_printout(runtime_printout)
+            runtime_printout, toggled = poll_runtime_printout(
+                runtime_printout,
+                keyboard,
+            )
             if toggled:
                 if runtime_printout:
                     render_dashboard(
@@ -943,6 +1019,7 @@ def main() -> int:
     except KeyboardInterrupt:
         stop_message = "Ctrl+C received"
     finally:
+        keyboard.close()
         if database is not None:
             ended_epoch = min(time.time(), day_end_epoch)
             finish_market_observation(

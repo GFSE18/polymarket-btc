@@ -1,0 +1,5 @@
+﻿detect_datetime_local,trader,processing_latency_seconds,side,outcome,market,duration,market_slug,shares,price,cash,fee,best_bid_price,best_bid_quantity,best_ask_price,best_ask_quantity
+2026-08-25 19:50:25.543,HighTempTation,0.260275,BUY,No,Will the lowest temperature in Istanbul be 24°C on August 26?,,lowest-temperature-in-istanbul-on-august-26-2026-24c,7.270000,0.980000,7.124600,0.007120,0.990000,3037.590000,,
+2026-08-25 19:50:28.440,HighTempTation,0.252053,SELL,No,Will the lowest temperature in Istanbul be 24°C on August 26?,,lowest-temperature-in-istanbul-on-august-26-2026-24c,7.270000,0.990000,7.197300,0.003590,0.990000,3059.860000,,
+2026-08-25 19:53:25.921,HighTempTation,0.262278,BUY,No,Will the lowest temperature in Ankara be 19°C on August 26?,,lowest-temperature-in-ankara-on-august-26-2026-19c,9.090000,0.980000,8.908200,0.008900,0.990000,3087.260000,,
+2026-08-25 19:53:29.927,HighTempTation,0.516831,SELL,No,Will the lowest temperature in Ankara be 19°C on August 26?,,lowest-temperature-in-ankara-on-august-26-2026-19c,9.090000,0.990000,8.999100,0.004490,0.990000,3101.350000,,

@@ -1,0 +1,3 @@
+﻿detect_datetime_local,trader,processing_latency_seconds,side,outcome,market,duration,market_slug,shares,price,cash,fee,best_bid_price,best_bid_quantity,best_ask_price,best_ask_quantity
+2026-08-25 21:23:22.651,HighTempTation,0.283871,BUY,No,Will the lowest temperature in Ankara be 18°C on August 26?,,lowest-temperature-in-ankara-on-august-26-2026-18c,9.090000,0.980000,8.908200,0.008900,0.990000,4841.510000,,
+2026-08-25 21:23:27.106,HighTempTation,0.246528,SELL,No,Will the lowest temperature in Ankara be 18°C on August 26?,,lowest-temperature-in-ankara-on-august-26-2026-18c,9.090000,0.990000,8.999100,0.004490,0.990000,4865.600000,,

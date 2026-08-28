@@ -1,0 +1,5 @@
+﻿detect_datetime_local,trader,processing_latency_seconds,side,outcome,market,duration,market_slug,shares,price,cash,fee,best_bid_price,best_bid_quantity,best_ask_price,best_ask_quantity
+2026-08-25 18:01:20.935,HighTempTation,0.328332,BUY,No,Will the lowest temperature in Karachi be 28°C on August 26?,,lowest-temperature-in-karachi-on-august-26-2026-28c,55.270000,0.978914,54.104600,0.057040,0.990000,755.470000,,
+2026-08-25 18:01:23.894,HighTempTation,0.246398,SELL,No,Will the lowest temperature in Karachi be 28°C on August 26?,,lowest-temperature-in-karachi-on-august-26-2026-28c,55.270000,0.990000,54.717300,0.027350,0.990000,700.200000,,
+2026-08-25 18:26:48.042,HighTempTation,1.277931,BUY,No,Will the lowest temperature in Kuala Lumpur be 27°C on August 26?,,lowest-temperature-in-kuala-lumpur-on-august-26-2026-27c,32.270000,0.866892,27.974600,0.186180,0.990000,766.180000,,
+2026-08-25 18:26:52.488,HighTempTation,0.222480,SELL,No,Will the lowest temperature in Kuala Lumpur be 27°C on August 26?,,lowest-temperature-in-kuala-lumpur-on-august-26-2026-27c,32.270000,0.990000,31.947300,0.015970,0.990000,766.180000,,

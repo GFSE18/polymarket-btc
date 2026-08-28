@@ -1,0 +1,3 @@
+﻿detect_datetime_local,trader,processing_latency_seconds,side,outcome,market,duration,market_slug,shares,price,cash,fee,best_bid_price,best_bid_quantity,best_ask_price,best_ask_quantity
+2026-08-25 23:00:25.422,HighTempTation,0.245903,BUY,No,Will the lowest temperature in Sao Paulo be 17°C on August 26?,,lowest-temperature-in-sao-paulo-on-august-26-2026-17c,63.800000,0.978934,62.456000,0.065780,0.990000,3771.150000,,
+2026-08-25 23:00:29.338,HighTempTation,0.299678,SELL,No,Will the lowest temperature in Sao Paulo be 17°C on August 26?,,lowest-temperature-in-sao-paulo-on-august-26-2026-17c,63.800000,0.990000,63.162000,0.031580,0.990000,5258.150000,,

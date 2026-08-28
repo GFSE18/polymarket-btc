@@ -25,11 +25,13 @@ POLYGON_HTTP = POLYGON_WS.replace("wss://", "https://")
 
 # Polymarket public API.
 GAMMA_API = "https://gamma-api.polymarket.com"
+DATA_API = "https://data-api.polymarket.com"
 
 # Wallets to watch.
 WATCHED = {
     # "pspspsps5": "0xb0f85baa97990910a3e8ac2b4a58a322f01ecef5",
-    "std0": "0xdf7930e89a2c47560165331863c31deca0733dcd",
+    # "std0": "0xdf7930e89a2c47560165331863c31deca0733dcd",
+    "HighTempTation": "0x6011655c4afb76f36dd1b08a137a1ba73466b31e",
 }
 
 # Polymarket V2 exchange contracts on Polygon.
@@ -53,6 +55,7 @@ PRINT_FAST_LINE_ON_CACHE_MISS = True
 
 # Request timeouts.
 GAMMA_TIMEOUT_SECONDS = 5
+TRADE_HISTORY_TIMEOUT_SECONDS = 5
 BLOCK_RPC_TIMEOUT_SECONDS = 2
 
 # Limit token -> market mappings in RAM.
@@ -504,6 +507,168 @@ def shorten_token(token_id, front=10, back=8):
         return token_id
 
     return f"{token_id[:front]}...{token_id[-back:]}"
+
+
+# ============================================================
+# STARTUP TRADE-HISTORY CONFIRMATION
+# ============================================================
+
+def fetch_latest_previous_trade(wallet):
+    """Return the newest public Data API trade for one watched wallet."""
+
+    response = requests.get(
+        f"{DATA_API}/trades",
+        params={
+            "user": wallet,
+            "limit": 1,
+            # Include trades where the wallet supplied maker liquidity too.
+            "takerOnly": "false",
+        },
+        timeout=TRADE_HISTORY_TIMEOUT_SECONDS,
+    )
+
+    response.raise_for_status()
+
+    trades = response.json()
+
+    if not isinstance(trades, list):
+        raise ValueError(
+            "Data API returned an unexpected trade-history response"
+        )
+
+    if not trades:
+        return None
+
+    trade = trades[0]
+
+    if not isinstance(trade, dict):
+        raise ValueError(
+            "Data API returned an invalid trade-history row"
+        )
+
+    return trade
+
+
+def _trade_number(trade, field):
+    """Parse a numeric Data API field without breaking startup output."""
+
+    try:
+        return float(trade.get(field, 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def print_previous_trade(trader_name, wallet, trade):
+    """Print a historical trade clearly separated from live detections."""
+
+    timestamp = _trade_number(
+        trade,
+        "timestamp",
+    )
+
+    if timestamp > 0:
+        trade_time = datetime.fromtimestamp(
+            timestamp
+        ).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    else:
+        trade_time = "UNKNOWN"
+
+    size = _trade_number(
+        trade,
+        "size",
+    )
+    price = _trade_number(
+        trade,
+        "price",
+    )
+
+    print()
+    print(
+        "-" * 120
+    )
+    print(
+        f"[CONNECTION CONFIRMED] Latest previous trade for "
+        f"{trader_name}"
+    )
+    print(
+        f"    wallet:       {wallet}"
+    )
+    print(
+        f"    trade time:   {trade_time} (local)"
+    )
+    print(
+        f"    trade:        "
+        f"{trade.get('side') or '?'} "
+        f"{trade.get('outcome') or '?'}"
+    )
+    print(
+        f"    market:       "
+        f"{trade.get('title') or 'UNKNOWN MARKET'}"
+    )
+    print(
+        f"    shares:       {size:.6f}"
+    )
+    print(
+        f"    price:        ~{price:.6f}"
+    )
+    print(
+        f"    cash:         ${size * price:.6f}"
+    )
+
+    if trade.get("transactionHash"):
+        print(
+            f"    tx:           {trade['transactionHash']}"
+        )
+
+    print(
+        "    source:       Polymarket Data API (historical; not logged)"
+    )
+    print(
+        "-" * 120,
+        flush=True,
+    )
+
+
+async def print_latest_previous_trades():
+    """Fetch one historical confirmation after live subscriptions succeed."""
+
+    print()
+    print(
+        "Checking the latest previous trade for each watched wallet...",
+        flush=True,
+    )
+
+    for trader_name, wallet in WATCHED.items():
+        try:
+            trade = await asyncio.to_thread(
+                fetch_latest_previous_trade,
+                wallet,
+            )
+
+            if trade is None:
+                print(
+                    f"[CONNECTION CONFIRMED] {trader_name}: "
+                    "subscriptions are live; no previous public trade found.",
+                    flush=True,
+                )
+                continue
+
+            print_previous_trade(
+                trader_name,
+                wallet,
+                trade,
+            )
+
+        except Exception as e:
+            # A history lookup is only a visual confirmation. The live Polygon
+            # subscriptions remain authoritative and must keep running.
+            print(
+                f"[history lookup warning] {trader_name}: "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
 
 
 # ============================================================
@@ -2071,6 +2236,8 @@ async def watch():
                     await csv_logger.close()
 
                     return
+
+                await print_latest_previous_trades()
 
                 print()
 

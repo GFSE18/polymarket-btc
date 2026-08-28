@@ -197,19 +197,22 @@ class CrossingTrackerTests(unittest.TestCase):
             def __init__(self, keys: str) -> None:
                 self.keys = list(keys)
 
-            def kbhit(self) -> bool:
-                return bool(self.keys)
+            def read_pending(self) -> list[str]:
+                keys = self.keys
+                self.keys = []
+                return keys
 
-            def getwch(self) -> str:
-                return self.keys.pop(0)
-
-        with patch.object(statistics, "_terminal_keyboard", FakeKeyboard("p")):
-            enabled, toggled = statistics.poll_runtime_printout(True)
+        enabled, toggled = statistics.poll_runtime_printout(
+            True,
+            FakeKeyboard("p"),
+        )
         self.assertFalse(enabled)
         self.assertTrue(toggled)
 
-        with patch.object(statistics, "_terminal_keyboard", FakeKeyboard("P")):
-            enabled, toggled = statistics.poll_runtime_printout(False)
+        enabled, toggled = statistics.poll_runtime_printout(
+            False,
+            FakeKeyboard("P"),
+        )
         self.assertTrue(enabled)
         self.assertTrue(toggled)
 
