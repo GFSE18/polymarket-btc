@@ -1,3 +1,4 @@
 btc_5m_twap_statistics_data/*.sqlite3-wal
 btc_5m_twap_statistics_data/*.sqlite3-shm
+btc_5m_twap_statistics_data/pre_flat_book_cleanup/
 .btc_5m_visualizer_cache/

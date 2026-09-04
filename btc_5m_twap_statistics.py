@@ -73,12 +73,13 @@ USER_AGENT = "polymarket-btc-5m-twap-statistics/1.0"
 # ============================================================
 
 
-@dataclass(frozen=True)
+@dataclass
 class MarketContext:
     slug: str
     window_epoch: int
     window_datetime_utc: str
     token_ids: dict[str, str]
+    price_to_beat: float | None = None
 
     @property
     def end_epoch(self) -> int:
@@ -697,6 +698,9 @@ async def price_to_beat_worker(
             price = None
         if price is not None:
             await asyncio.to_thread(database.set_price_to_beat, market_id, price)
+            # Keep the live console status line in sync with the value saved
+            # to the market row.
+            market.price_to_beat = price
             return
         await asyncio.sleep(PRICE_TO_BEAT_RETRY_SECONDS)
 
@@ -769,6 +773,7 @@ def render_sample(
         f"\r\033[2K{market.slug} | {elapsed:6.2f}s | "
         f"Up {display(up_bid)}/{display(up_ask)} | "
         f"Down {display(down_bid)}/{display(down_ask)} | "
+        f"Price to beat ${display(market.price_to_beat, 2)} | "
         f"TWAP {display(twap_price, 8)} | "
         f"{'VALID' if valid else 'INVALID'}"
     )

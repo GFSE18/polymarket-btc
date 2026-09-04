@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""Print the distribution of valid sample records per market.
+"""Print the distribution of complete order-book readings per market.
 
-Change DATASET_DATE below, then run:
+Run for the configured inclusive date range:
     python btc_5m_twap_valid_record_summary.py
+
+Or provide one or more dates:
+    python btc_5m_twap_valid_record_summary.py 2026-09-01 2026-09-02
 """
 
 from __future__ import annotations
 
+import argparse
 import sqlite3
-from datetime import datetime
+from datetime import date, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 
-# Change this value to inspect another daily dataset.
-DATASET_DATE = "2026-08-29"
+# Change these inclusive bounds to inspect another range by default.
+START_DATASET_DATE = "2026-08-28"
+END_DATASET_DATE = "2026-09-04"
 
 DATA_DIR = Path(__file__).resolve().parent / "btc_5m_twap_statistics_data"
 DATABASE_TEMPLATE = "btc_5m_twap_statistics_{date}.sqlite3"
@@ -30,38 +34,55 @@ def read_only_connection(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def bucket_label(valid_records: int) -> str:
-    if valid_records == 0:
+def bucket_label(good_book_records: int) -> str:
+    if good_book_records == 0:
         return "0"
-    if valid_records <= 1200:
-        lower = ((valid_records - 1) // 100) * 100 + 1
+    if good_book_records <= 1200:
+        lower = ((good_book_records - 1) // 100) * 100 + 1
         upper = lower + 99
         return f"{lower}-{upper}"
     return "1201+"
 
 
-def et_time(utc_text: str) -> str:
-    value = datetime.fromisoformat(utc_text).astimezone(
-        ZoneInfo("America/New_York")
-    )
-    return value.strftime("%Y-%m-%d %I:%M:%S %p ET")
+def configured_dataset_dates() -> list[str]:
+    """Return every ISO date in the configured inclusive range."""
+    try:
+        start = date.fromisoformat(START_DATASET_DATE)
+        end = date.fromisoformat(END_DATASET_DATE)
+    except ValueError as exc:
+        raise SystemExit(
+            "START_DATASET_DATE and END_DATASET_DATE must use YYYY-MM-DD."
+        ) from exc
+    if end < start:
+        raise SystemExit("END_DATASET_DATE must be on or after START_DATASET_DATE.")
+
+    result = []
+    current = start
+    while current <= end:
+        result.append(current.isoformat())
+        current += timedelta(days=1)
+    return result
 
 
-def main() -> None:
-    database = DATA_DIR / DATABASE_TEMPLATE.format(date=DATASET_DATE)
+def print_summary(dataset_date: str) -> None:
+    database = DATA_DIR / DATABASE_TEMPLATE.format(date=dataset_date)
     if not database.is_file():
-        raise SystemExit(f"Dataset not found: {database}")
+        print(f"Dataset: {dataset_date} (not found; skipped)")
+        return
 
     connection = read_only_connection(database)
     try:
         counts = connection.execute(
             """
-            SELECT m.id, m.slug, m.window_datetime_utc,
-                   COUNT(s.sample_index) AS valid_records
+            SELECT m.id,
+                   COUNT(s.sample_index) AS good_book_records
             FROM markets AS m
             LEFT JOIN samples AS s
               ON s.market_id = m.id
-             AND s.sample_valid = 1
+             AND s.up_bid IS NOT NULL
+             AND s.up_ask IS NOT NULL
+             AND s.down_bid IS NOT NULL
+             AND s.down_ask IS NOT NULL
             GROUP BY m.id
             ORDER BY m.id
             """
@@ -71,30 +92,36 @@ def main() -> None:
 
     requested_buckets = ["0"] + [f"{start}-{start + 99}" for start in range(1, 1201, 100)]
     labels = requested_buckets + (
-        ["1201+"] if any(int(row[3]) > 1200 for row in counts) else []
+        ["1201+"] if any(int(row[1]) > 1200 for row in counts) else []
     )
     grouped = {label: 0 for label in labels}
-    for _, _, _, count in counts:
+    for _, count in counts:
         grouped[bucket_label(int(count))] += 1
 
-    print(f"Dataset: {DATASET_DATE}")
+    print(f"Dataset: {dataset_date}")
     print(f"Total markets: {len(counts)}")
     print()
-    print(f"{'Valid records':<18}Markets")
-    print(f"{'-' * 18}{'-' * 7}")
+    print(f"{'Good book readings':<20}Markets")
+    print(f"{'-' * 20}{'-' * 7}")
     for label in labels:
-        print(f"{label:<18}{grouped[label]:>7}")
+        print(f"{label:<20}{grouped[label]:>7}")
 
-    zero_markets = [row for row in counts if int(row[3]) == 0]
-    print()
-    print(f"Markets with 0 valid records ({len(zero_markets)}):")
-    if zero_markets:
-        print(f"{'Market start (ET)':<27}Slug")
-        print(f"{'-' * 27}{'-' * 4}")
-        for _, slug, window_datetime_utc, _ in zero_markets:
-            print(f"{et_time(window_datetime_utc):<27}{slug}")
-    else:
-        print("None")
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "dates",
+        nargs="*",
+        metavar="YYYY-MM-DD",
+        help="one or more dataset dates; overrides the configured date range",
+    )
+    args = parser.parse_args()
+
+    dates = args.dates or configured_dataset_dates()
+    for index, dataset_date in enumerate(dates):
+        if index:
+            print()
+        print_summary(dataset_date)
 
 
 if __name__ == "__main__":

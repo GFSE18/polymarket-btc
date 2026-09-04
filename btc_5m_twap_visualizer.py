@@ -102,13 +102,15 @@ def plot_market(samples: pd.DataFrame, market: pd.Series, interval_seconds: floa
 
     samples = samples.copy()
     samples["elapsed_seconds"] = samples["sample_index"] * interval_seconds
-    valid = samples.loc[samples["sample_valid"].astype(bool)].copy()
+    # Keep every captured record.  ``sample_valid`` also depends on TWAP
+    # availability, so filtering on it hides usable order-book snapshots.
+    plotted = samples
 
     start_et = market_start_et(market)
-    valid["time_et"] = start_et + pd.to_timedelta(
-        valid["elapsed_seconds"], unit="s"
+    plotted["time_et"] = start_et + pd.to_timedelta(
+        plotted["elapsed_seconds"], unit="s"
     )
-    customdata = valid[
+    customdata = plotted[
         [
             "sample_index", "time_et", "elapsed_seconds", "up_bid", "up_ask",
             "down_bid", "down_ask", "twap_price",
@@ -128,8 +130,8 @@ def plot_market(samples: pd.DataFrame, market: pd.Series, interval_seconds: floa
     for column, (color, label, linestyle, marker_symbol) in book_styles.items():
         figure.add_trace(
             go.Scatter(
-                x=valid["elapsed_seconds"],
-                y=valid[column],
+                x=plotted["elapsed_seconds"],
+                y=plotted[column],
                 customdata=customdata,
                 mode="lines+markers",
                 name=label,
@@ -146,8 +148,8 @@ def plot_market(samples: pd.DataFrame, market: pd.Series, interval_seconds: floa
 
     figure.add_trace(
         go.Scatter(
-            x=valid["elapsed_seconds"],
-            y=valid["twap_price"],
+            x=plotted["elapsed_seconds"],
+            y=plotted["twap_price"],
             customdata=customdata,
             mode="lines+markers",
             name="BTC TWAP",
@@ -184,7 +186,8 @@ def plot_market(samples: pd.DataFrame, market: pd.Series, interval_seconds: floa
         plot_bgcolor="#FFFFFF",
         font={"color": "#111827"},
     )
-    return figure, len(valid), len(samples)
+    valid_count = int(samples["sample_valid"].astype(bool).sum())
+    return figure, len(plotted), valid_count, len(samples)
 
 
 def run_app() -> None:
@@ -262,7 +265,9 @@ def run_app() -> None:
         st.error(f"Could not read market samples: {exc}")
         st.stop()
 
-    figure, valid_count, total_count = plot_market(samples, market, interval_seconds)
+    figure, plotted_count, valid_count, total_count = plot_market(
+        samples, market, interval_seconds
+    )
     selection = st.plotly_chart(
         figure,
         width="stretch",
@@ -282,7 +287,7 @@ def run_app() -> None:
                 f"value {float(point.get('y', 0)):.6f}"
             )
     st.caption(
-        f"{valid_count:,} valid samples plotted out of {total_count:,} "
+        f"{plotted_count:,} samples plotted ({valid_count:,} marked valid) out of {total_count:,} "
         f"at {interval_seconds:g}-second intervals. Book prices use the left axis; "
         "BTC TWAP and price-to-beat use the right axis. Hover for a tooltip, or click a point to keep its value visible."
     )
