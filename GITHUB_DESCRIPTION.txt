@@ -1,1 +1,0 @@
-Python research toolkit for Polymarket BTC 5-minute markets: live order-book and TWAP collection, SQLite datasets, interactive dashboards, and strategy backtesting.
